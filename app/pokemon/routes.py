@@ -1,4 +1,3 @@
-
 import requests
 from flask import request
 from flask_restx import Namespace, Resource, fields, reqparse
@@ -7,114 +6,95 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.models import Pokemon, TipoPokemon, PokemonUsuario
 from app.extensions import db
 
-# --- Namespace e Modelos ---
 pokemon_ns = Namespace('pokemon', description='Operações relacionadas a Pokémon e grupos de batalha')
 
-# Modelo para a maioria das respostas de Pokémon
-modelo_pokemon_simples = pokemon_ns.model('PokemonSimples', {
+# MODELO ATUALIZADO para incluir os atributos que faltavam
+modelo_pokemon_completo = pokemon_ns.model('PokemonCompleto', {
     'id': fields.Integer(description='ID do Pokémon'),
     'nome': fields.String(description='Nome do Pokémon'),
     'imagem': fields.String(description='URL da imagem do Pokémon'),
     'tipo': fields.String(description='Tipo principal do Pokémon'),
+    'hp': fields.Integer(description='Pontos de Vida (HP)'),
+    'attack': fields.Integer(description='Pontos de Ataque'),
+    'defense': fields.Integer(description='Pontos de Defesa'),
 })
 
-# Modelos para Grupo de Batalha
-modelo_grupo_entrada = pokemon_ns.model('GrupoEntrada', {
-    'grupo': fields.List(fields.Integer, required=True, description='Lista de IDs dos Pokémon para o grupo de batalha (máximo 6)')
-})
-modelo_grupo_resposta = pokemon_ns.model('GrupoResposta', {
-    'grupo': fields.List(fields.Nested(modelo_pokemon_simples), description='Lista de Pokémon no grupo de batalha')
-})
-
-# Modelo para Lista de Favoritos
-modelo_favoritos_resposta = pokemon_ns.model('FavoritosResposta', {
-    'favoritos': fields.List(fields.Nested(modelo_pokemon_simples), description='Lista de Pokémon favoritos')
-})
-
-# Modelo para mensagens genéricas
-modelo_mensagem = pokemon_ns.model('MensagemSimples', {
-    'mensagem': fields.String
-})
-
-# --- NOVO MODELO PARA A RESPOSTA DA LISTAGEM ---
 modelo_listagem_pokemon = pokemon_ns.model('ListagemPokemon', {
-    'items': fields.List(fields.Nested(modelo_pokemon_simples)),
-    'total': fields.Integer(description='Total de itens encontrados'),
-    'page': fields.Integer(description='Página atual'),
-    'pages': fields.Integer(description='Total de páginas'),
-    'per_page': fields.Integer(description='Itens por página'),
+    'items': fields.List(fields.Nested(modelo_pokemon_completo)),
+    'total': fields.Integer,
+    'page': fields.Integer,
+    'pages': fields.Integer,
+    'per_page': fields.Integer,
 })
 
-# --- NOVO PARSER PARA OS ARGUMENTOS DE FILTRO E PAGINAÇÃO ---
 listagem_parser = reqparse.RequestParser()
 listagem_parser.add_argument('page', type=int, default=1, help='Número da página')
 listagem_parser.add_argument('per_page', type=int, default=12, help='Itens por página')
-listagem_parser.add_argument('nome', type=str, default='', help='Filtrar por nome do Pokémon')
+listagem_parser.add_argument('nome', type=str, help='Filtrar por nome do Pokémon')
+
+# Outros modelos que já tínhamos
+modelo_grupo_entrada = pokemon_ns.model('GrupoEntrada', { 'grupo': fields.List(fields.Integer, required=True, description='Lista de IDs dos Pokémon (máximo 6)')})
+modelo_grupo_resposta = pokemon_ns.model('GrupoResposta', { 'grupo': fields.List(fields.Nested(modelo_pokemon_completo), description='Lista de Pokémon no grupo de batalha')})
+modelo_favoritos_resposta = pokemon_ns.model('FavoritosResposta', { 'favoritos': fields.List(fields.Nested(modelo_pokemon_completo), description='Lista de Pokémon favoritos')})
+modelo_mensagem = pokemon_ns.model('MensagemSimples', { 'mensagem': fields.String })
 
 
-# --- Função Auxiliar ---
+# FUNÇÃO GARANTIR_POKEMON_NO_DB ATUALIZADA para guardar os atributos
 def garantir_pokemon_no_db(pokemon_id):
-    '''Verifica se um Pokémon existe no DB local. Se não, busca na PokeAPI e o salva.'''
     pokemon = Pokemon.query.get(pokemon_id)
     if pokemon:
         return pokemon
-
+    
     url = f'https://pokeapi.co/api/v2/pokemon/{pokemon_id}'
     res = requests.get(url)
     if res.status_code != 200:
+        print(f"ID {pokemon_id} não encontrado na PokeAPI.")
         return None
 
     data = res.json()
-    nome = data.get('name')
-    # Torna a busca pela imagem mais segura, evitando erros se 'sprites' não existir
-    imagem = data.get('sprites', {}).get('front_default')
-    altura = data.get('height')
-    peso = data.get('weight')
-    tipos = [t['type']['name'] for t in data.get('types', [])]
-
-    tipo_principal = tipos[0] if tipos else None
+    
+    # Extrai os stats de uma forma segura
+    stats = {s['stat']['name']: s['base_stat'] for s in data['stats']}
+    
+    tipo_principal_nome = data['types'][0]['type']['name'] if data['types'] else None
     tipo_obj = None
-    if tipo_principal:
-        tipo_obj = TipoPokemon.query.filter_by(nome_tipo=tipo_principal).first()
+    if tipo_principal_nome:
+        tipo_obj = TipoPokemon.query.filter_by(nome_tipo=tipo_principal_nome).first()
         if not tipo_obj:
-            tipo_obj = TipoPokemon(nome_tipo=tipo_principal)
+            tipo_obj = TipoPokemon(nome_tipo=tipo_principal_nome)
             db.session.add(tipo_obj)
             db.session.commit()
 
     novo_pokemon = Pokemon(
-        id=pokemon_id,
-        nome_pokemon=nome,
-        url_imagem=imagem,
-        altura=altura,
-        peso=peso,
-        tipo_id=tipo_obj.id if tipo_obj else None
+        id=data['id'],
+        nome_pokemon=data['name'],
+        url_imagem=data['sprites']['front_default'],
+        tipo_id=tipo_obj.id if tipo_obj else None,
+        # Adiciona os stats ao novo objeto Pokémon
+        hp=stats.get('hp', 0),
+        attack=stats.get('attack', 0),
+        defense=stats.get('defense', 0)
     )
     db.session.add(novo_pokemon)
     db.session.commit()
-    print(f'Pokémon {nome} (ID: {pokemon_id}) salvo no DB com sucesso.')
+    print(f"Pokémon {data['name']} (ID: {pokemon_id}) salvo no DB.")
     return novo_pokemon
 
-# --- NOVO RECURSO PARA A LISTAGEM DE POKÉMON ---
+
+# ROTA DE LISTAGEM ATUALIZADA para incluir os atributos na resposta
 @pokemon_ns.route('/listagem')
 class ListagemPokemon(Resource):
     @pokemon_ns.marshal_with(modelo_listagem_pokemon)
     @pokemon_ns.expect(listagem_parser)
     def get(self):
-        '''Lista e filtra os Pokémon da base de dados local com paginação.'''
+        '''Lista e filtra os Pokémon da base de dados local'''
         args = listagem_parser.parse_args()
-        page = args['page']
-        per_page = args['per_page']
-        nome_filtro = args['nome']
-
         query = Pokemon.query
-
-        if nome_filtro:
-            # .ilike() faz uma pesquisa "case-insensitive"
-            query = query.filter(Pokemon.nome_pokemon.ilike(f'%{nome_filtro}%'))
+        if args['nome']:
+            query = query.filter(Pokemon.nome_pokemon.ilike(f"%{args['nome']}%"))
         
-        paginacao = query.order_by(Pokemon.id).paginate(page=page, per_page=per_page, error_out=False)
+        paginacao = query.order_by(Pokemon.id).paginate(page=args['page'], per_page=args['per_page'], error_out=False)
         
-        # Formata os itens para corresponder ao modelo de resposta
         items_formatados = []
         for pokemon in paginacao.items:
             tipo = db.session.get(TipoPokemon, pokemon.tipo_id) if pokemon.tipo_id else None
@@ -122,7 +102,11 @@ class ListagemPokemon(Resource):
                 'id': pokemon.id,
                 'nome': pokemon.nome_pokemon,
                 'imagem': pokemon.url_imagem,
-                'tipo': tipo.nome_tipo if tipo else 'N/A'
+                'tipo': tipo.nome_tipo if tipo else 'N/A',
+                # Adiciona os atributos à resposta
+                'hp': pokemon.hp,
+                'attack': pokemon.attack,
+                'defense': pokemon.defense,
             })
             
         return {
@@ -271,3 +255,4 @@ class GrupoBatalha(Resource):
                 })
 
         return {'grupo': grupo_formatado}
+
